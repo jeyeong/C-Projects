@@ -1,4 +1,4 @@
-#Kilo
+# Kilo
 
 This is a Linux terminal-based text editor. To compile, simply run "make" in the terminal, followed by ./kilo.exe <text file>.
   
