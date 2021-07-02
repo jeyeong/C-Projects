@@ -6,19 +6,22 @@
 
 /*** defines, structs ***/
 
-#define MIN_ALLOC_SIZE 4096  // page sized chunk
-#define UNTAG(p) (((long) (p)) & 0xfffffffffffffffe)
+#define MIN_ALLOC_SIZE 4096  // page-sized chunk
 
 typedef struct header {
     unsigned int size;
     struct header *next;
 } header_t;
 
+#define UNTAG(p) ((header_t *) ((long) p & 0xfffffffffffffffc))
+
+// unsigned long stack_bottom;
+
 /*** header operations ***/
 
 static header_t base = {0, &base};  // zero sized block to start with
 static header_t *freep = &base;  // pointer to the first free block of memory
-static header_t *usedp;  // pointer to the first used block of memory
+static header_t *usedp = NULL;  // pointer to the first used block of memory
 
 /*
  * Scans the free list and look for a place to put the block.
@@ -125,7 +128,8 @@ void *gc_malloc(size_t alloc_size)
 /*
  * Scan a region of memory and mark any items in the used list if there exists
  * a pointer in the region that points to the item.
- * Note: Both arguments should be word-aligned.
+ *
+ * Note: Both arguments must be word-aligned.
  */
 static void scan_region(long *sp, long *end)
 {
@@ -142,12 +146,91 @@ static void scan_region(long *sp, long *end)
         // So we mark the header.
         do {
             if ((long) (curr_used + 1) <= ptr &&
-                (long) (curr_used + 1 + curr_used->size) > ptr) {
+                (long) (curr_used + curr_used->size) > ptr) {
                     // Mark header
                     curr_used->next = (header_t *) ((long) curr_used->next | 1);
                     break;
                 }
-        } while ((curr_used = (header_t *) UNTAG(curr_used->next)) != usedp);
+        } while ((curr_used = UNTAG(curr_used->next)) != usedp);
+    }
+}
+
+/*
+ * Scan the marked blocks for references to other unmarked blocks.
+ */
+static void scan_heap(void)
+{
+    long *mem_block;
+    header_t *curr_used, *up;
+
+    // Cycle through the used list (i.e. the heap). For each member of the used
+    // list, if its header is marked, then we scan every 8-byte block of memory
+    // within the allocated space. If there is a pointer that points to some
+    // other member of the used list, then that space is still being used. So
+    // we mark the header.
+    curr_used = usedp;
+    do {
+        // Unmarked
+        if (!((long) curr_used->next & 1))
+            continue;
+
+        // Marked
+        for (mem_block = (long *) (curr_used + 1);
+             mem_block < (long *) (curr_used + curr_used->size);
+             mem_block++) {
+            long ptr = *mem_block;
+            up = UNTAG(curr_used->next);
+            do {
+                if (up != curr_used &&
+                    (long) (up + 1) <= ptr &&
+                    (long) (up + up->size) > ptr) {
+                    up->next = (header_t *) ((long) up->next | 1);
+                    break;
+                }
+            } while ((up = UNTAG(up->next)) != curr_used);
+        }
+    } while ((curr_used = UNTAG(curr_used->next)) != usedp);
+}
+
+/*
+ * Marks blocks of memory in use and frees the ones not in use.
+ */
+void gc_collect(void)
+{
+    header_t *p, *prevp, *tp;
+    // unsigned long stack_top;
+    extern char end, etext;  // provided by the linker
+
+    if (usedp == NULL) return;
+
+    // Scan the BSS and initialized data segments
+    scan_region((long *) &etext, (long *) &end);
+
+    // Scan the stack
+
+    // Scan the heap
+    scan_heap();
+
+    // Collection
+    for (prevp = usedp, p = UNTAG(usedp->next);; prevp = p, p = UNTAG(p->next)) {
+    next_chunk:
+        if (!((long) p->next & 1)) {
+            // The chunk hasn't been marked. Thus, it must be set free. 
+            tp = p;
+            p = UNTAG(p->next);
+            add_to_free_list(tp);
+
+            if (usedp == tp) { 
+                usedp = NULL;
+                break;
+            }
+
+            prevp->next = (header_t *) ((long) p | ((long) prevp->next & 1));
+            goto next_chunk;
+        }
+        p->next = (header_t *) ((long) p->next & ~1);
+        if (p == usedp)
+            break;
     }
 }
 
@@ -165,18 +248,22 @@ int main()
 {
     initialize();
 
-    printf("Global var: %p\n", freep);
+    printf("freep: %p\n", freep);
     printf("freep->next: %p\n", freep->next);
+    printf("freep->next->next: %p\n", freep->next->next);
 
-    printf("Malloc 1: %p\n", gc_malloc(16));
-    printf("Malloc 2: %p\n", gc_malloc(4080));
-    printf("Malloc 3: %p\n", gc_malloc(32));
+    int *p1, *p2, *p3;
 
-    long x = 0x800080ff0;
+    printf("Malloc 1: %p\n", p1 = gc_malloc(16));
+    printf("Malloc 2: %p\n", p2 = gc_malloc(4080));
+    printf("Malloc 3: %p\n", p3 = gc_malloc(32));
 
-    scan_region(&x, &x + 1);
+    gc_collect();
 
-    printf("Malloc 1 check: %p\n", usedp->next);
+    printf("freep: %p\n", freep);
+    printf("freep->next: %p\n", freep->next);
+    printf("freep->next->next: %p\n", freep->next->next);
+    printf("freep->next->next->next: %p\n", freep->next->next->next);
 
     return 0;
 }
